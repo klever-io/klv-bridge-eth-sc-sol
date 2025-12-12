@@ -84,7 +84,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
         uint256 totalBalance,
         uint256 mintBalance,
         uint256 burnBalance
-    ) external onlyAdmin {
+    ) external onlyBridge {
         if (!mintBurn) {
             require(native, "Only native tokens can be stored!");
         }
@@ -107,7 +107,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
      @notice Remove a token from the whitelist
      @param token Address of the ERC20 token that will be removed from the whitelist
     */
-    function removeTokenFromWhitelist(address token) external onlyAdmin {
+    function removeTokenFromWhitelist(address token) external onlyBridge {
         whitelistedTokens[token] = false;
     }
 
@@ -155,7 +155,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
      @param token Address of the ERC20 token
      @param amount New minimum amount for deposits
     */
-    function setTokenMinLimit(address token, uint256 amount) external onlyAdmin {
+    function setTokenMinLimit(address token, uint256 amount) external onlyBridge {
         tokenMinLimits[token] = amount;
     }
 
@@ -168,7 +168,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
      @param token Address of the ERC20 token
      @param amount New maximum amount for deposits
     */
-    function setTokenMaxLimit(address token, uint256 amount) external onlyAdmin {
+    function setTokenMaxLimit(address token, uint256 amount) external onlyBridge {
         tokenMaxLimits[token] = amount;
     }
 
@@ -261,7 +261,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
       @param tokenAddress Address of the contract for the ERC20 token that will be deposited
       @param amount number of tokens that need to be deposited
     */
-    function initSupply(address tokenAddress, uint256 amount) public onlyAdmin {
+    function initSupply(address tokenAddress, uint256 amount) public onlyBridge {
         require(whitelistedTokens[tokenAddress], "Unsupported token");
         require(!_isTokenMintBurn(tokenAddress), "Cannot init for mintable/burnable tokens");
         require(nativeTokens[tokenAddress], "Only native tokens can be stored!");
@@ -277,7 +277,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
       @param burnAmount number of tokens that are already burned
       @param mintAmount number of tokens that are already minted
     */
-    function initSupplyMintBurn(address tokenAddress, uint256 mintAmount, uint256 burnAmount) public onlyAdmin {
+    function initSupplyMintBurn(address tokenAddress, uint256 mintAmount, uint256 burnAmount) public onlyBridge {
         require(whitelistedTokens[tokenAddress], "Unsupported token");
         require(_isTokenMintBurn(tokenAddress), "Cannot init for non mintable/burnable tokens");
 
@@ -315,11 +315,11 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
     }
 
     /**
-     @notice Endpoint used by the admin to reset the token balance to the current balance
+     @notice Endpoint used by the bridge to reset the token balance to the current balance
      @notice This endpoint is used only for migration from v2 to v3 and will be removed in the next version
      @param tokenAddress Address of the ERC20 contract
     */
-    function resetTotalBalance(address tokenAddress) external onlyAdmin {
+    function resetTotalBalance(address tokenAddress) external onlyBridge {
         require(whitelistedTokens[tokenAddress], "Unsupported token");
         require(!_isTokenMintBurn(tokenAddress), "Token is mintable/burnable");
 
@@ -329,10 +329,12 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
     }
 
     /**
-     @notice Endpoint used by the admin to recover tokens sent directly to the contract
+     @notice Endpoint used by the bridge to recover tokens sent directly to the contract
      @param tokenAddress Address of the ERC20 contract
+     @param recipient Address to send recovered funds to
     */
-    function recoverLostFunds(address tokenAddress) external onlyAdmin {
+    function recoverLostFunds(address tokenAddress, address recipient) external onlyBridge {
+        require(recipient != address(0), "Invalid recipient");
         IERC20 erc20 = IERC20(tokenAddress);
         uint256 mainBalance = erc20.balanceOf(address(this));
         uint256 availableForRecovery;
@@ -342,7 +344,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
             availableForRecovery = mainBalance;
         }
 
-        erc20.safeTransfer(msg.sender, availableForRecovery);
+        erc20.safeTransfer(recipient, availableForRecovery);
     }
 
     /**

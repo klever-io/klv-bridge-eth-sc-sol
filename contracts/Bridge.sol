@@ -27,10 +27,28 @@ relayers with the execute call, in order to save gas.
 contract Bridge is Initializable, RelayerRole, Pausable {
     /*============================ EVENTS ============================*/
     event QuorumChanged(uint256 quorum);
+    event TokenWhitelisted(address indexed token);
+    event TokenRemovedFromWhitelist(address indexed token);
+    event TokenLimitsUpdated(address indexed token, uint256 minLimit, uint256 maxLimit);
+    event SafeBridgeUpdated(address indexed newBridge);
+    event LostFundsRecovered(address indexed token, address indexed recipient, uint256 amount);
+    event TotalBalanceReset(address indexed token);
+    event RelayerAddedWithApproval(address indexed account);
+    event RelayerRemovedWithApproval(address indexed account);
 
     /*========================= CONTRACT STATE =========================*/
     string private constant action = "CurrentPendingBatch";
     string private constant executeTransferAction = "ExecuteBatchedTransfer";
+    string private constant whitelistTokenAction = "WhitelistToken";
+    string private constant removeTokenAction = "RemoveToken";
+    string private constant setTokenLimitsAction = "SetTokenLimits";
+    string private constant setBridgeAction = "SetBridge";
+    string private constant recoverFundsAction = "RecoverFunds";
+    string private constant resetBalanceAction = "ResetBalance";
+    string private constant setQuorumAction = "SetQuorum";
+    string private constant unpauseAction = "Unpause";
+    string private constant addRelayerAction = "AddRelayer";
+    string private constant removeRelayerAction = "RemoveRelayer";
     string private constant prefix = "\x19Ethereum Signed Message:\n32";
     uint256 private constant minimumQuorum = 3;
     uint256 public batchSettleBlockCount;
@@ -88,6 +106,258 @@ contract Bridge is Initializable, RelayerRole, Pausable {
         require(!safe.isAnyBatchInProgress(), "Cannot change batchSettleBlockCount with pending batches");
         batchSettleBlockCount = newBatchSettleLimit;
     }
+
+    /*========================= QUORUM-PROTECTED SAFE OPERATIONS =========================*/
+
+    /**
+        @notice Whitelist a token on the Safe with relayer approval
+        @param token Address of the ERC20 token that will be whitelisted
+        @param minimumAmount Minimum deposit amount
+        @param maximumAmount Maximum deposit amount
+        @param mintBurn Whether this is a mint/burn token
+        @param native Whether this is a native token
+        @param totalBalance Initial total balance
+        @param mintBalance Initial mint balance
+        @param burnBalance Initial burn balance
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function whitelistToken(
+        address token,
+        uint256 minimumAmount,
+        uint256 maximumAmount,
+        bool mintBurn,
+        bool native,
+        uint256 totalBalance,
+        uint256 mintBalance,
+        uint256 burnBalance,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external whenPaused onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(
+                token, minimumAmount, maximumAmount, mintBurn, native,
+                totalBalance, mintBalance, burnBalance, nonce, whitelistTokenAction
+            ))
+        );
+
+        safe.whitelistToken(token, minimumAmount, maximumAmount, mintBurn, native, totalBalance, mintBalance, burnBalance);
+        emit TokenWhitelisted(token);
+    }
+
+    /**
+        @notice Remove a token from whitelist on the Safe with relayer approval
+        @param token Address of the ERC20 token
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function removeTokenFromWhitelist(
+        address token,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external whenPaused onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(token, nonce, removeTokenAction))
+        );
+
+        safe.removeTokenFromWhitelist(token);
+        emit TokenRemovedFromWhitelist(token);
+    }
+
+    /**
+        @notice Set token limits on the Safe with relayer approval
+        @param token Address of the ERC20 token
+        @param minAmount New minimum amount
+        @param maxAmount New maximum amount
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function setTokenLimits(
+        address token,
+        uint256 minAmount,
+        uint256 maxAmount,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(token, minAmount, maxAmount, nonce, setTokenLimitsAction))
+        );
+
+        safe.setTokenMinLimit(token, minAmount);
+        safe.setTokenMaxLimit(token, maxAmount);
+        emit TokenLimitsUpdated(token, minAmount, maxAmount);
+    }
+
+    /**
+        @notice Update the bridge address on the Safe with relayer approval
+        @param newBridge New bridge contract address
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function updateSafeBridge(
+        address newBridge,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external whenPaused onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        require(newBridge != address(0), "Invalid bridge address");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(newBridge, nonce, setBridgeAction))
+        );
+
+        safe.setBridge(newBridge);
+        emit SafeBridgeUpdated(newBridge);
+    }
+
+    /**
+        @notice Recover lost funds from the Safe with relayer approval
+        @param token Address of the ERC20 token
+        @param recipient Address to send recovered funds to
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function recoverLostFunds(
+        address token,
+        address recipient,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external whenPaused onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        require(recipient != address(0), "Invalid recipient");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(token, recipient, nonce, recoverFundsAction))
+        );
+
+        safe.recoverLostFunds(token, recipient);
+        emit LostFundsRecovered(token, recipient, 0);
+    }
+
+    /**
+        @notice Reset total balance on the Safe with relayer approval
+        @param token Address of the ERC20 token
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function resetTotalBalance(
+        address token,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external whenPaused onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(token, nonce, resetBalanceAction))
+        );
+
+        safe.resetTotalBalance(token);
+        emit TotalBalanceReset(token);
+    }
+
+    /*========================= QUORUM-PROTECTED BRIDGE OPERATIONS =========================*/
+
+    /**
+        @notice Modifies the quorum with relayer approval
+        @param newQuorum Number of valid signatures required for executions
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function setQuorumWithApproval(
+        uint256 newQuorum,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external whenPaused onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        require(newQuorum >= minimumQuorum, "Quorum is too low");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(newQuorum, nonce, setQuorumAction))
+        );
+
+        quorum = newQuorum;
+        emit QuorumChanged(newQuorum);
+    }
+
+    /**
+        @notice Unpause the contract with relayer approval
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function unpauseWithApproval(
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(nonce, unpauseAction))
+        );
+
+        _unpause();
+    }
+
+    /**
+        @notice Add a relayer with relayer approval
+        @param account Address of the new relayer
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function addRelayerWithApproval(
+        address account,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        require(account != address(0), "Invalid relayer address");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(account, nonce, addRelayerAction))
+        );
+
+        _addRelayer(account);
+        emit RelayerAddedWithApproval(account);
+    }
+
+    /**
+        @notice Remove a relayer with relayer approval
+        @param account Address of the relayer to remove
+        @param nonce Unique nonce for this operation
+        @param signatures Relayer signatures
+    */
+    function removeRelayerWithApproval(
+        address account,
+        uint256 nonce,
+        bytes[] calldata signatures
+    ) external onlyRelayer {
+        require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        require(getRelayersCount() > quorum, "Cannot go below quorum");
+
+        _validateQuorum(
+            signatures,
+            _getHashedDepositData(abi.encode(account, nonce, removeRelayerAction))
+        );
+
+        _removeRelayer(account);
+        emit RelayerRemovedWithApproval(account);
+    }
+
+    /*========================= VIEW FUNCTIONS =========================*/
 
     /**
         @notice Gets information about the batch

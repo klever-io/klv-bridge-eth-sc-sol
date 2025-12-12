@@ -3,6 +3,14 @@ const { ethers } = require("hardhat");
 const { encodeCallData } = require("@multiversx/sdk-js-bridge");
 
 const { deployContract, deployUpgradableContract, upgradeContract } = require("./utils/deploy.utils");
+const { 
+  getSignaturesForWhitelistToken, 
+  getSignaturesForRemoveToken, 
+  getSignaturesForSetTokenLimits,
+  getSignaturesForUnpause,
+  getSignaturesForRecoverLostFunds,
+  getSignaturesForUpdateSafeBridge,
+} = require("./utils/bridge.utils");
 
 describe("ERC20Safe", function () {
   const defaultMinAmount = 25;
@@ -10,23 +18,71 @@ describe("ERC20Safe", function () {
 
   let adminWallet, otherWallet, simpleBoardMember;
   let boardMembers;
+  let relayerWallets;
+  let nonce = 0;
 
   before(async function() {
     [adminWallet, otherWallet, simpleBoardMember] = await ethers.getSigners();
     boardMembers = [adminWallet, otherWallet, simpleBoardMember];
+    relayerWallets = [adminWallet, otherWallet, simpleBoardMember];
   });
 
   let safe, genericERC20, bridge;
   beforeEach(async function () {
+    nonce = 0;
     genericERC20 = await deployContract(adminWallet, "GenericERC20", ["TSC", "TSC", 6]);
     safe = await deployUpgradableContract(adminWallet, "ERC20Safe");
     bridge = await deployUpgradableContract(adminWallet, "Bridge", [boardMembers.map(m => m.address), 3, safe.address]);
 
     await genericERC20.approve(safe.address, 1000);
     await safe.setBridge(bridge.address);
-    await bridge.unpause();
+    // Keep bridge paused for admin operations, unpause safe
     await safe.unpause();
   });
+
+  // Helper function to whitelist token through bridge
+  async function whitelistToken(tokenAddress, minAmount, maxAmount, mintBurn = false, native = true, totalBalance = 0, mintBalance = 0, burnBalance = 0) {
+    // Pause bridge first (whitelistToken requires whenPaused)
+    if (!(await bridge.paused())) {
+      await bridge.pause();
+    }
+    const sigs = await getSignaturesForWhitelistToken(
+      tokenAddress, minAmount, maxAmount, mintBurn, native, totalBalance, mintBalance, burnBalance, ++nonce, relayerWallets
+    );
+    await bridge.whitelistToken(tokenAddress, minAmount, maxAmount, mintBurn, native, totalBalance, mintBalance, burnBalance, nonce, sigs);
+  }
+
+  // Helper function to set token limits through bridge
+  async function setTokenLimits(tokenAddress, minAmount, maxAmount) {
+    // Need to unpause bridge for setTokenLimits (it doesn't require whenPaused)
+    if (await bridge.paused()) {
+      const unpauseSigs = await getSignaturesForUnpause(++nonce, relayerWallets);
+      await bridge.unpauseWithApproval(nonce, unpauseSigs);
+    }
+    
+    const sigs = await getSignaturesForSetTokenLimits(tokenAddress, minAmount, maxAmount, ++nonce, relayerWallets);
+    await bridge.setTokenLimits(tokenAddress, minAmount, maxAmount, nonce, sigs);
+  }
+
+  // Helper function to remove token from whitelist through bridge
+  async function removeTokenFromWhitelist(tokenAddress) {
+    // Pause bridge first (removeTokenFromWhitelist requires whenPaused)
+    if (!(await bridge.paused())) {
+      await bridge.pause();
+    }
+    const sigs = await getSignaturesForRemoveToken(tokenAddress, ++nonce, relayerWallets);
+    await bridge.removeTokenFromWhitelist(tokenAddress, nonce, sigs);
+  }
+
+  // Helper function to recover lost funds through bridge
+  async function recoverFunds(tokenAddress, recipient) {
+    // Pause bridge first (recoverLostFunds requires whenPaused)
+    if (!(await bridge.paused())) {
+      await bridge.pause();
+    }
+    const sigs = await getSignaturesForRecoverLostFunds(tokenAddress, recipient, ++nonce, relayerWallets);
+    await bridge.recoverLostFunds(tokenAddress, recipient, nonce, sigs);
+  }
 
   it("sets creator as admin", async function () {
     expect(await safe.admin()).to.equal(adminWallet.address);
@@ -34,26 +90,26 @@ describe("ERC20Safe", function () {
 
   describe("ERC20Safe - setting whitelisted tokens works as expected", async function () {
     it("correctly whitelists token and updates limits", async function () {
-      await safe.whitelistToken(genericERC20.address, "25", "100", false, true, 0, 0, 0);
+      await whitelistToken(genericERC20.address, "25", "100", false, true, 0, 0, 0);
       expect(await safe.isTokenWhitelisted(genericERC20.address)).to.be.true;
       expect(await safe.getTokenMinLimit(genericERC20.address)).to.eq("25");
       expect(await safe.getTokenMaxLimit(genericERC20.address)).to.eq("100");
 
-      await safe.setTokenMinLimit(genericERC20.address, "50");
-      await safe.setTokenMaxLimit(genericERC20.address, "80");
+      await setTokenLimits(genericERC20.address, "50", "80");
       expect(await safe.getTokenMinLimit(genericERC20.address)).to.eq("50");
       expect(await safe.getTokenMaxLimit(genericERC20.address)).to.eq("80");
     });
     it("correctly removes token from whitelist", async function () {
-      await safe.removeTokenFromWhitelist(genericERC20.address);
+      await whitelistToken(genericERC20.address, "25", "100", false, true, 0, 0, 0);
+      await removeTokenFromWhitelist(genericERC20.address);
       expect(await safe.isTokenWhitelisted(genericERC20.address)).to.be.false;
     });
-    it("reverts", async function () {
+    it("reverts when called directly on safe (not through bridge)", async function () {
       await expect(
         safe.connect(otherWallet).whitelistToken(genericERC20.address, "0", "100", false, true, 0, 0, 0),
-      ).to.be.revertedWith("Access Control: sender is not Admin");
+      ).to.be.revertedWith("Access Control: sender is not Bridge");
       await expect(safe.connect(otherWallet).removeTokenFromWhitelist(genericERC20.address)).to.be.revertedWith(
-        "Access Control: sender is not Admin",
+        "Access Control: sender is not Bridge",
       );
     });
   });
@@ -98,7 +154,7 @@ describe("ERC20Safe", function () {
       );
 
       // Creating a batch
-      await safe.whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+      await whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
       await genericERC20.approve(safe.address, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
       await genericERC20.mint(adminWallet.address, "1000000");
       await safe.unpause();
@@ -202,7 +258,7 @@ describe("ERC20Safe", function () {
 
     describe("when token is whitelisted", async function () {
       beforeEach(async function () {
-        await safe.whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+        await whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
         await genericERC20.approve(safe.address, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         await genericERC20.mint(adminWallet.address, "1000000");
       });
@@ -369,24 +425,25 @@ describe("ERC20Safe", function () {
       await genericERC20.mint(adminWallet.address, "1000000000000");
     });
 
-    it("reverts for non admin", async function () {
+    it("reverts when called directly on safe (not through bridge)", async function () {
       await genericERC20.transfer(safe.address, "100");
-      await expect(safe.connect(otherWallet).recoverLostFunds(genericERC20.address)).to.be.revertedWith(
-        "Access Control: sender is not Admin",
+      await expect(safe.connect(otherWallet).recoverLostFunds(genericERC20.address, otherWallet.address)).to.be.revertedWith(
+        "Access Control: sender is not Bridge",
       );
     });
 
     it("sends full balance for unwhitelisted tokens", async function () {
       await genericERC20.transfer(safe.address, "1000000");
       expect(await genericERC20.balanceOf(adminWallet.address)).to.be.eq("999999000000");
-      await safe.recoverLostFunds(genericERC20.address);
+      // Recover through bridge with signatures
+      await recoverFunds(genericERC20.address, adminWallet.address);
       expect(await genericERC20.balanceOf(adminWallet.address)).to.be.eq("1000000000000");
 
       expect(await genericERC20.balanceOf(safe.address)).to.be.eq("0");
     });
 
     it("sends just the balance above what is actually deposited for whitelited tokens", async function () {
-      await safe.whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+      await whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
       await genericERC20.approve(safe.address, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
       await safe.deposit(
@@ -403,14 +460,15 @@ describe("ERC20Safe", function () {
       await genericERC20.transfer(safe.address, "1");
       expect(await genericERC20.balanceOf(adminWallet.address)).to.be.eq("999999999949");
 
-      await safe.recoverLostFunds(genericERC20.address);
+      // Recover through bridge
+      await recoverFunds(genericERC20.address, adminWallet.address);
       expect(await genericERC20.balanceOf(adminWallet.address)).to.be.eq("999999999950");
 
       expect(await genericERC20.balanceOf(safe.address)).to.be.eq("50");
     });
 
     it("sends just the balance above what is actually deposited for whitelited tokens - considers bridge transfers", async function () {
-      await safe.whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+      await whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
       await genericERC20.approve(safe.address, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
       const mockBridge = await deployUpgradableContract(adminWallet, "BridgeMock", [
@@ -418,7 +476,13 @@ describe("ERC20Safe", function () {
         3,
         safe.address,
       ]);
-      await safe.setBridge(mockBridge.address);
+      
+      // Update bridge through the current bridge with relayer approval
+      if (!(await bridge.paused())) {
+        await bridge.pause();
+      }
+      const updateBridgeSigs = await getSignaturesForUpdateSafeBridge(mockBridge.address, ++nonce, relayerWallets);
+      await bridge.updateSafeBridge(mockBridge.address, nonce, updateBridgeSigs);
 
       await safe.deposit(
         genericERC20.address,
@@ -436,7 +500,8 @@ describe("ERC20Safe", function () {
       await genericERC20.transfer(safe.address, "1");
       expect(await genericERC20.balanceOf(adminWallet.address)).to.be.eq("999999999974");
 
-      await safe.recoverLostFunds(genericERC20.address);
+      // Recover through mockBridge which has recoverLostFunds that calls safe directly
+      await mockBridge.recoverLostFunds(genericERC20.address, adminWallet.address);
       expect(await genericERC20.balanceOf(adminWallet.address)).to.be.eq("999999999975");
 
       expect(await genericERC20.balanceOf(safe.address)).to.be.eq("25");
@@ -445,7 +510,7 @@ describe("ERC20Safe", function () {
 
   describe("ERC20Safe - getBatch and getDeposits work as expected", async function () {
     beforeEach(async function () {
-      await safe.whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+      await whitelistToken(genericERC20.address, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
       await genericERC20.approve(safe.address, "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
       await genericERC20.mint(adminWallet.address, "1000000");
     });

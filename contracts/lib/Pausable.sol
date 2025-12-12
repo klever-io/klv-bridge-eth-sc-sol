@@ -73,6 +73,14 @@ contract Pausable is Initializable, AdminRole {
      * - The contract must be paused.
      */
     function unpause() external onlyAdmin {
+        _unpause();
+    }
+
+    /**
+     * @dev Internal function to unpause the contract.
+     * Can be overridden by derived contracts for custom unpause logic.
+     */
+    function _unpause() internal {
         _paused = false;
         emit Pause(false);
     }

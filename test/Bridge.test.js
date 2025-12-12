@@ -2,29 +2,42 @@ const { ethers } = require("hardhat");
 const { expect } = require("chai");
 
 const { deployContract, deployUpgradableContract } = require("./utils/deploy.utils");
-const { getSignaturesForExecuteTransfer, getExecuteTransferData } = require("./utils/bridge.utils");
+const { getSignaturesForExecuteTransfer, getExecuteTransferData, getSignaturesForWhitelistToken, getSignaturesForUnpause } = require("./utils/bridge.utils");
 
 describe("Bridge", async function () {
   let adminWallet, relayer1, relayer2, relayer3, relayer4, relayer5, relayer6, relayer7, relayer8, otherWallet;
   let boardMembers;
+  let relayerWallets;
   const quorum = 7;
+  let nonce = 0;
 
   let erc20Safe, bridge, genericErc20;
 
   async function setupContracts() {
+    nonce = 0;
     erc20Safe = await deployUpgradableContract(adminWallet, "ERC20Safe");
     bridge = await deployUpgradableContract(adminWallet, "Bridge", [boardMembers, quorum, erc20Safe.address]);
     await erc20Safe.setBridge(bridge.address);
-    await bridge.unpause();
+    // Pause bridge to whitelist token (Bridge starts unpaused)
+    await bridge.pause();
+    // Setup ERC20 token while bridge is paused
     await setupErc20Token();
+    // Unpause safe first
+    await erc20Safe.unpause();
+    // Then unpause bridge with relayer signatures
+    const unpauseSigs = await getSignaturesForUnpause(++nonce, relayerWallets);
+    await bridge.connect(adminWallet).unpauseWithApproval(nonce, unpauseSigs);
   }
 
   async function setupErc20Token() {
     genericErc20 = await deployContract(adminWallet, "GenericERC20", ["TSC", "TSC", 6]);
     await genericErc20.mint(adminWallet.address, 1000);
     await genericErc20.approve(erc20Safe.address, 1000);
-    await erc20Safe.whitelistToken(genericErc20.address, 0, 100, false, true, 0, 0, 0);
-    await erc20Safe.unpause();
+    // Whitelist token through bridge with relayer signatures (bridge is paused at this point)
+    const whitelistSigs = await getSignaturesForWhitelistToken(
+      genericErc20.address, 0, 100, false, true, 0, 0, 0, ++nonce, relayerWallets
+    );
+    await bridge.whitelistToken(genericErc20.address, 0, 100, false, true, 0, 0, 0, nonce, whitelistSigs);
   }
 
   before(async function() {
@@ -32,6 +45,7 @@ describe("Bridge", async function () {
     boardMembers = [adminWallet, relayer1, relayer2, relayer3, relayer5, relayer6, relayer7, relayer8].map(
       m => m.address,
     );
+    relayerWallets = [adminWallet, relayer1, relayer2, relayer3, relayer5, relayer6, relayer7, relayer8];
   });
 
   beforeEach(async function () {

@@ -66,11 +66,18 @@ contract BridgeRole is Initializable, AdminRole {
 
     /**
      * @dev Transfers bridge role of the contract to a new account (`newBridge`).
-     * Can only be called by the current bridge.
+     * Can only be called by the current bridge (which requires relayer quorum),
+     * or by admin if no bridge is set yet (initial setup).
      */
-    function setBridge(address newBridge) public onlyAdmin {
+    function setBridge(address newBridge) public {
+        // Allow admin to set initial bridge, or existing bridge to update
+        if (_bridge == address(0)) {
+            require(admin() == msg.sender, "Access Control: sender is not Admin");
+        } else {
+            require(_bridge == msg.sender, "Access Control: sender is not Bridge");
+        }
         require(newBridge != address(0), "BridgeRole: new bridge is the zero address");
-        require(newBridge != _bridge, "BridgeRole: same address");
+        require(newBridge != _bridge, "BridgeRole: same bridge");
         require(newBridge.isContract(), "BridgeRole: new bridge must be a contract");
 
         emit BridgeTransferred(_bridge, newBridge);

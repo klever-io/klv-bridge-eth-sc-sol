@@ -66,7 +66,7 @@ contract RelayerRole is Initializable, AdminRole {
         return _relayers._values;
     }
 
-    function getRelayersCount() external view returns (uint256) {
+    function getRelayersCount() public view returns (uint256) {
         return _relayers.length();
     }
 
@@ -79,13 +79,13 @@ contract RelayerRole is Initializable, AdminRole {
         }
     }
 
-    function _addRelayer(address account) private {
+    function _addRelayer(address account) internal {
         _validateAddress(account);
         require(_relayers.add(account), "RelayerRole: address is already a relayer");
         emit RelayerAdded(account, msg.sender);
     }
 
-    function _removeRelayer(address account) private {
+    function _removeRelayer(address account) internal {
         require(_relayers.remove(account), "RelayerRole: address is not a relayer");
         emit RelayerRemoved(account, msg.sender);
     }
