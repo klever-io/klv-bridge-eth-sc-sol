@@ -54,6 +54,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     uint256 public batchSettleBlockCount;
 
     uint256 public quorum;
+    uint256 public operationNonce;
     // Reserved storage slots for future upgrades
     uint256[10] private __gap;
 
@@ -110,6 +111,15 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     /*========================= QUORUM-PROTECTED SAFE OPERATIONS =========================*/
 
     /**
+        @dev Validates and consumes a nonce, preventing replay attacks
+        @param nonce The nonce to use - must equal current operationNonce
+    */
+    function _useNonce(uint256 nonce) internal {
+        require(nonce == operationNonce, "Invalid nonce");
+        operationNonce++;
+    }
+
+    /**
         @notice Whitelist a token on the Safe with relayer approval
         @param token Address of the ERC20 token that will be whitelisted
         @param minimumAmount Minimum deposit amount
@@ -135,6 +145,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
         bytes[] calldata signatures
     ) external whenPaused onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -160,6 +171,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
         bytes[] calldata signatures
     ) external whenPaused onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -186,6 +198,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
         bytes[] calldata signatures
     ) external onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -210,6 +223,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     ) external whenPaused onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
         require(newBridge != address(0), "Invalid bridge address");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -235,6 +249,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     ) external whenPaused onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
         require(recipient != address(0), "Invalid recipient");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -257,6 +272,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
         bytes[] calldata signatures
     ) external whenPaused onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -282,6 +298,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     ) external whenPaused onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
         require(newQuorum >= minimumQuorum, "Quorum is too low");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -302,6 +319,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
         bytes[] calldata signatures
     ) external onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -324,6 +342,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     ) external onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
         require(account != address(0), "Invalid relayer address");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
@@ -347,6 +366,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
     ) external onlyRelayer {
         require(signatures.length >= quorum, "Not enough signatures to achieve quorum");
         require(getRelayersCount() > quorum, "Cannot go below quorum");
+        _useNonce(nonce);
 
         _validateQuorum(
             signatures,
