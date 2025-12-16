@@ -2,31 +2,40 @@ const { ethers } = require("hardhat");
 const { expect } = require("chai");
 
 const { deployContract, deployUpgradableContract } = require("./utils/deploy.utils");
-const { getSignaturesForExecuteTransfer, getExecuteTransferData, getSignaturesForWhitelistToken, getSignaturesForUnpause } = require("./utils/bridge.utils");
+const { 
+  getSignaturesForExecuteTransfer, 
+  getExecuteTransferData, 
+  getSignaturesForWhitelistToken, 
+  getSignaturesForUnpause,
+  getSignaturesForAction,
+  getSignaturesForSetQuorum,
+  getSignaturesForAddRelayer,
+  getSignaturesForRemoveRelayer,
+  getSignaturesForUpdateSafeBridge,
+} = require("./utils/bridge.utils");
 
 describe("Bridge", async function () {
   let adminWallet, relayer1, relayer2, relayer3, relayer4, relayer5, relayer6, relayer7, relayer8, otherWallet;
   let boardMembers;
   let relayerWallets;
   const quorum = 7;
-  let nonce = 0;
 
   let erc20Safe, bridge, genericErc20;
 
   async function setupContracts() {
-    nonce = 0;
     erc20Safe = await deployUpgradableContract(adminWallet, "ERC20Safe");
     bridge = await deployUpgradableContract(adminWallet, "Bridge", [boardMembers, quorum, erc20Safe.address]);
     await erc20Safe.setBridge(bridge.address);
     // Pause bridge to whitelist token (Bridge starts unpaused)
     await bridge.pause();
-    // Setup ERC20 token while bridge is paused
+    // Setup ERC20 token while bridge is paused (uses nonce 0)
     await setupErc20Token();
     // Unpause safe first
     await erc20Safe.unpause();
-    // Then unpause bridge with relayer signatures
-    const unpauseSigs = await getSignaturesForUnpause(++nonce, relayerWallets);
-    await bridge.connect(adminWallet).unpauseWithApproval(nonce, unpauseSigs);
+    // Then unpause bridge with relayer signatures (uses nonce 1)
+    const currentNonce = await bridge.operationNonce();
+    const unpauseSigs = await getSignaturesForUnpause(currentNonce, relayerWallets);
+    await bridge.connect(adminWallet).unpauseWithApproval(currentNonce, unpauseSigs);
   }
 
   async function setupErc20Token() {
@@ -34,10 +43,11 @@ describe("Bridge", async function () {
     await genericErc20.mint(adminWallet.address, 1000);
     await genericErc20.approve(erc20Safe.address, 1000);
     // Whitelist token through bridge with relayer signatures (bridge is paused at this point)
+    const currentNonce = await bridge.operationNonce();
     const whitelistSigs = await getSignaturesForWhitelistToken(
-      genericErc20.address, 0, 100, false, true, 0, 0, 0, ++nonce, relayerWallets
+      genericErc20.address, 0, 100, false, true, 0, 0, 0, currentNonce, relayerWallets
     );
-    await bridge.whitelistToken(genericErc20.address, 0, 100, false, true, 0, 0, 0, nonce, whitelistSigs);
+    await bridge.whitelistToken(genericErc20.address, 0, 100, false, true, 0, 0, 0, currentNonce, whitelistSigs);
   }
 
   before(async function() {
@@ -435,6 +445,499 @@ describe("Bridge", async function () {
             signatures,
           ),
         ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("whitelistToken quorum validation", async function () {
+    let newToken;
+    let testNonce;
+
+    beforeEach(async function () {
+      newToken = await deployContract(adminWallet, "GenericERC20", ["NEW", "NEW", 18]);
+      testNonce = await bridge.operationNonce();
+      // Pause bridge to whitelist token
+      await bridge.pause();
+    });
+
+    describe("when all signatures are from the same relayer", async function () {
+      it("reverts", async function () {
+        const dataToSign = await getSignaturesForAction([
+          { type: "address", value: newToken.address },
+          { type: "uint256", value: 0 },
+          { type: "uint256", value: 100 },
+          { type: "bool", value: false },
+          { type: "bool", value: true },
+          { type: "uint256", value: 0 },
+          { type: "uint256", value: 0 },
+          { type: "uint256", value: 0 },
+          { type: "uint256", value: testNonce },
+        ], "WhitelistToken", [adminWallet]);
+        
+        // Repeat the same signature to reach quorum count
+        const duplicateSignatures = Array(quorum).fill(dataToSign[0]);
+
+        await expect(
+          bridge.whitelistToken(newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, duplicateSignatures),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+    });
+
+    describe("when some signatures are from the same relayer", async function () {
+      it("reverts when unique signatures are less than quorum", async function () {
+        // Get signatures from only 3 unique relayers (less than quorum of 7)
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const validSigs = await getSignaturesForWhitelistToken(
+          newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, partialWallets
+        );
+        // Pad with duplicates to reach quorum count
+        const duplicatePaddedSigs = [...validSigs, validSigs[0], validSigs[0], validSigs[0], validSigs[0]];
+
+        await expect(
+          bridge.whitelistToken(newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, duplicatePaddedSigs),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+
+      it("succeeds when unique signatures meet quorum", async function () {
+        const signatures = await getSignaturesForWhitelistToken(
+          newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, relayerWallets
+        );
+
+        await bridge.whitelistToken(newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, signatures);
+        expect(await erc20Safe.isTokenWhitelisted(newToken.address)).to.be.true;
+      });
+    });
+
+    describe("when not enough signatures for quorum", async function () {
+      it("reverts", async function () {
+        // Only 3 signatures, quorum is 7
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const signatures = await getSignaturesForWhitelistToken(
+          newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, partialWallets
+        );
+
+        await expect(
+          bridge.whitelistToken(newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, signatures),
+        ).to.be.revertedWith("Not enough signatures to achieve quorum");
+      });
+    });
+
+    describe("called by a non relayer", async function () {
+      it("reverts", async function () {
+        const signatures = await getSignaturesForWhitelistToken(
+          newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, relayerWallets
+        );
+        const nonRelayerBridge = bridge.connect(otherWallet);
+
+        await expect(
+          nonRelayerBridge.whitelistToken(newToken.address, 0, 100, false, true, 0, 0, 0, testNonce, signatures),
+        ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("unpauseWithApproval quorum validation", async function () {
+    let testNonce;
+
+    beforeEach(async function () {
+      testNonce = await bridge.operationNonce();
+      // Ensure bridge is paused
+      await bridge.pause();
+    });
+
+    describe("when all signatures are from the same relayer", async function () {
+      it("reverts", async function () {
+        const singleSig = await getSignaturesForUnpause(testNonce, [adminWallet]);
+        const duplicateSignatures = Array(quorum).fill(singleSig[0]);
+
+        await expect(
+          bridge.unpauseWithApproval(testNonce, duplicateSignatures),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+    });
+
+    describe("when some signatures are from the same relayer", async function () {
+      it("reverts when unique signatures are less than quorum", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const validSigs = await getSignaturesForUnpause(testNonce, partialWallets);
+        const duplicatePaddedSigs = [...validSigs, validSigs[0], validSigs[0], validSigs[0], validSigs[0]];
+
+        await expect(
+          bridge.unpauseWithApproval(testNonce, duplicatePaddedSigs),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+
+      it("succeeds when unique signatures meet quorum", async function () {
+        const signatures = await getSignaturesForUnpause(testNonce, relayerWallets);
+
+        await bridge.unpauseWithApproval(testNonce, signatures);
+        expect(await bridge.paused()).to.be.false;
+      });
+    });
+
+    describe("when not enough signatures for quorum", async function () {
+      it("reverts", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const signatures = await getSignaturesForUnpause(testNonce, partialWallets);
+
+        await expect(
+          bridge.unpauseWithApproval(testNonce, signatures),
+        ).to.be.revertedWith("Not enough signatures to achieve quorum");
+      });
+    });
+
+    describe("called by a non relayer", async function () {
+      it("reverts", async function () {
+        const signatures = await getSignaturesForUnpause(testNonce, relayerWallets);
+        const nonRelayerBridge = bridge.connect(otherWallet);
+
+        await expect(
+          nonRelayerBridge.unpauseWithApproval(testNonce, signatures),
+        ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("setQuorumWithApproval quorum validation", async function () {
+    let testNonce;
+    const newQuorumValue = 8;
+
+    beforeEach(async function () {
+      testNonce = await bridge.operationNonce();
+      // setQuorumWithApproval requires bridge to be paused
+      await bridge.pause();
+    });
+
+    describe("when all signatures are from the same relayer", async function () {
+      it("reverts", async function () {
+        const singleSig = await getSignaturesForSetQuorum(newQuorumValue, testNonce, [adminWallet]);
+        const duplicateSignatures = Array(quorum).fill(singleSig[0]);
+
+        await expect(
+          bridge.setQuorumWithApproval(newQuorumValue, testNonce, duplicateSignatures),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+    });
+
+    describe("when some signatures are from the same relayer", async function () {
+      it("reverts when unique signatures are less than quorum", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const validSigs = await getSignaturesForSetQuorum(newQuorumValue, testNonce, partialWallets);
+        const duplicatePaddedSigs = [...validSigs, validSigs[0], validSigs[0], validSigs[0], validSigs[0]];
+
+        await expect(
+          bridge.setQuorumWithApproval(newQuorumValue, testNonce, duplicatePaddedSigs),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+
+      it("succeeds when unique signatures meet quorum", async function () {
+        const signatures = await getSignaturesForSetQuorum(newQuorumValue, testNonce, relayerWallets);
+
+        await bridge.setQuorumWithApproval(newQuorumValue, testNonce, signatures);
+        expect(await bridge.quorum()).to.equal(newQuorumValue);
+      });
+    });
+
+    describe("when not enough signatures for quorum", async function () {
+      it("reverts", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const signatures = await getSignaturesForSetQuorum(newQuorumValue, testNonce, partialWallets);
+
+        await expect(
+          bridge.setQuorumWithApproval(newQuorumValue, testNonce, signatures),
+        ).to.be.revertedWith("Not enough signatures to achieve quorum");
+      });
+    });
+
+    describe("called by a non relayer", async function () {
+      it("reverts", async function () {
+        const signatures = await getSignaturesForSetQuorum(newQuorumValue, testNonce, relayerWallets);
+        const nonRelayerBridge = bridge.connect(otherWallet);
+
+        await expect(
+          nonRelayerBridge.setQuorumWithApproval(newQuorumValue, testNonce, signatures),
+        ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("addRelayerWithApproval quorum validation", async function () {
+    let testNonce;
+
+    beforeEach(async function () {
+      testNonce = await bridge.operationNonce();
+    });
+
+    describe("when all signatures are from the same relayer", async function () {
+      it("reverts", async function () {
+        const singleSig = await getSignaturesForAddRelayer(relayer4.address, testNonce, [adminWallet]);
+        const duplicateSignatures = Array(quorum).fill(singleSig[0]);
+
+        await expect(
+          bridge.addRelayerWithApproval(relayer4.address, testNonce, duplicateSignatures),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+    });
+
+    describe("when some signatures are from the same relayer", async function () {
+      it("reverts when unique signatures are less than quorum", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const validSigs = await getSignaturesForAddRelayer(relayer4.address, testNonce, partialWallets);
+        const duplicatePaddedSigs = [...validSigs, validSigs[0], validSigs[0], validSigs[0], validSigs[0]];
+
+        await expect(
+          bridge.addRelayerWithApproval(relayer4.address, testNonce, duplicatePaddedSigs),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+
+      it("succeeds when unique signatures meet quorum", async function () {
+        const signatures = await getSignaturesForAddRelayer(relayer4.address, testNonce, relayerWallets);
+
+        await bridge.addRelayerWithApproval(relayer4.address, testNonce, signatures);
+        expect(await bridge.isRelayer(relayer4.address)).to.be.true;
+      });
+    });
+
+    describe("when not enough signatures for quorum", async function () {
+      it("reverts", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const signatures = await getSignaturesForAddRelayer(relayer4.address, testNonce, partialWallets);
+
+        await expect(
+          bridge.addRelayerWithApproval(relayer4.address, testNonce, signatures),
+        ).to.be.revertedWith("Not enough signatures to achieve quorum");
+      });
+    });
+
+    describe("called by a non relayer", async function () {
+      it("reverts", async function () {
+        const signatures = await getSignaturesForAddRelayer(relayer4.address, testNonce, relayerWallets);
+        const nonRelayerBridge = bridge.connect(otherWallet);
+
+        await expect(
+          nonRelayerBridge.addRelayerWithApproval(relayer4.address, testNonce, signatures),
+        ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("removeRelayerWithApproval quorum validation", async function () {
+    let testNonce;
+
+    beforeEach(async function () {
+      testNonce = await bridge.operationNonce();
+      // Add relayer4 first so we can remove them
+      await bridge.addRelayer(relayer4.address);
+    });
+
+    describe("when all signatures are from the same relayer", async function () {
+      it("reverts", async function () {
+        const singleSig = await getSignaturesForRemoveRelayer(relayer4.address, testNonce, [adminWallet]);
+        const duplicateSignatures = Array(quorum).fill(singleSig[0]);
+
+        await expect(
+          bridge.removeRelayerWithApproval(relayer4.address, testNonce, duplicateSignatures),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+    });
+
+    describe("when some signatures are from the same relayer", async function () {
+      it("reverts when unique signatures are less than quorum", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const validSigs = await getSignaturesForRemoveRelayer(relayer4.address, testNonce, partialWallets);
+        const duplicatePaddedSigs = [...validSigs, validSigs[0], validSigs[0], validSigs[0], validSigs[0]];
+
+        await expect(
+          bridge.removeRelayerWithApproval(relayer4.address, testNonce, duplicatePaddedSigs),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+
+      it("succeeds when unique signatures meet quorum", async function () {
+        const signatures = await getSignaturesForRemoveRelayer(relayer4.address, testNonce, relayerWallets);
+
+        await bridge.removeRelayerWithApproval(relayer4.address, testNonce, signatures);
+        expect(await bridge.isRelayer(relayer4.address)).to.be.false;
+      });
+    });
+
+    describe("when not enough signatures for quorum", async function () {
+      it("reverts", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const signatures = await getSignaturesForRemoveRelayer(relayer4.address, testNonce, partialWallets);
+
+        await expect(
+          bridge.removeRelayerWithApproval(relayer4.address, testNonce, signatures),
+        ).to.be.revertedWith("Not enough signatures to achieve quorum");
+      });
+    });
+
+    describe("called by a non relayer", async function () {
+      it("reverts", async function () {
+        const signatures = await getSignaturesForRemoveRelayer(relayer4.address, testNonce, relayerWallets);
+        const nonRelayerBridge = bridge.connect(otherWallet);
+
+        await expect(
+          nonRelayerBridge.removeRelayerWithApproval(relayer4.address, testNonce, signatures),
+        ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("updateSafeBridge quorum validation", async function () {
+    let testNonce;
+    let newBridge;
+
+    beforeEach(async function () {
+      testNonce = await bridge.operationNonce();
+      // Deploy a new bridge to use as the new bridge address
+      newBridge = await deployUpgradableContract(adminWallet, "Bridge", [boardMembers, quorum, erc20Safe.address]);
+      // updateSafeBridge requires bridge to be paused
+      await bridge.pause();
+    });
+
+    describe("when all signatures are from the same relayer", async function () {
+      it("reverts", async function () {
+        const singleSig = await getSignaturesForUpdateSafeBridge(newBridge.address, testNonce, [adminWallet]);
+        const duplicateSignatures = Array(quorum).fill(singleSig[0]);
+
+        await expect(
+          bridge.updateSafeBridge(newBridge.address, testNonce, duplicateSignatures),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+    });
+
+    describe("when some signatures are from the same relayer", async function () {
+      it("reverts when unique signatures are less than quorum", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const validSigs = await getSignaturesForUpdateSafeBridge(newBridge.address, testNonce, partialWallets);
+        const duplicatePaddedSigs = [...validSigs, validSigs[0], validSigs[0], validSigs[0], validSigs[0]];
+
+        await expect(
+          bridge.updateSafeBridge(newBridge.address, testNonce, duplicatePaddedSigs),
+        ).to.be.revertedWith("Quorum was not met");
+      });
+
+      it("succeeds when unique signatures meet quorum", async function () {
+        const signatures = await getSignaturesForUpdateSafeBridge(newBridge.address, testNonce, relayerWallets);
+
+        await bridge.updateSafeBridge(newBridge.address, testNonce, signatures);
+        expect(await erc20Safe.bridge()).to.equal(newBridge.address);
+      });
+    });
+
+    describe("when not enough signatures for quorum", async function () {
+      it("reverts", async function () {
+        const partialWallets = [adminWallet, relayer1, relayer2];
+        const signatures = await getSignaturesForUpdateSafeBridge(newBridge.address, testNonce, partialWallets);
+
+        await expect(
+          bridge.updateSafeBridge(newBridge.address, testNonce, signatures),
+        ).to.be.revertedWith("Not enough signatures to achieve quorum");
+      });
+    });
+
+    describe("called by a non relayer", async function () {
+      it("reverts", async function () {
+        const signatures = await getSignaturesForUpdateSafeBridge(newBridge.address, testNonce, relayerWallets);
+        const nonRelayerBridge = bridge.connect(otherWallet);
+
+        await expect(
+          nonRelayerBridge.updateSafeBridge(newBridge.address, testNonce, signatures),
+        ).to.be.revertedWith("Access Control: sender is not Relayer");
+      });
+    });
+  });
+
+  describe("operationNonce validation", async function () {
+    it("initial operationNonce is 0", async function () {
+      // After setupContracts, nonce has been used for whitelistToken (0) and unpauseWithApproval (1)
+      // So current operationNonce should be 2
+      expect(await bridge.operationNonce()).to.equal(2);
+    });
+
+    it("operationNonce increments after successful operation", async function () {
+      const currentNonce = await bridge.operationNonce();
+      
+      // Add a new relayer with approval
+      const signatures = await getSignaturesForAddRelayer(relayer4.address, currentNonce, relayerWallets);
+      await bridge.addRelayerWithApproval(relayer4.address, currentNonce, signatures);
+      
+      expect(await bridge.operationNonce()).to.equal(currentNonce + 1n);
+    });
+
+    describe("using wrong nonce", async function () {
+      it("reverts when nonce is too low (already used)", async function () {
+        const usedNonce = 0; // This was used during setup
+        const signatures = await getSignaturesForAddRelayer(relayer4.address, usedNonce, relayerWallets);
+        
+        await expect(
+          bridge.addRelayerWithApproval(relayer4.address, usedNonce, signatures),
+        ).to.be.revertedWith("Invalid nonce");
+      });
+
+      it("reverts when nonce is too high (future nonce)", async function () {
+        const currentNonce = await bridge.operationNonce();
+        const futureNonce = currentNonce + 10n;
+        const signatures = await getSignaturesForAddRelayer(relayer4.address, futureNonce, relayerWallets);
+        
+        await expect(
+          bridge.addRelayerWithApproval(relayer4.address, futureNonce, signatures),
+        ).to.be.revertedWith("Invalid nonce");
+      });
+    });
+
+    describe("replay attack prevention", async function () {
+      it("cannot replay operation with same nonce", async function () {
+        const currentNonce = await bridge.operationNonce();
+        
+        // First operation succeeds
+        const signatures = await getSignaturesForAddRelayer(relayer4.address, currentNonce, relayerWallets);
+        await bridge.addRelayerWithApproval(relayer4.address, currentNonce, signatures);
+        
+        // Try to replay the same operation - should fail because nonce was consumed
+        await expect(
+          bridge.addRelayerWithApproval(relayer4.address, currentNonce, signatures),
+        ).to.be.revertedWith("Invalid nonce");
+      });
+
+      it("operations must use sequential nonces", async function () {
+        const currentNonce = await bridge.operationNonce();
+        
+        // First operation with current nonce
+        const sig1 = await getSignaturesForAddRelayer(relayer4.address, currentNonce, relayerWallets);
+        await bridge.addRelayerWithApproval(relayer4.address, currentNonce, sig1);
+        
+        // Second operation must use next nonce
+        const nextNonce = currentNonce + 1n;
+        await bridge.pause();
+        const sig2 = await getSignaturesForSetQuorum(8, nextNonce, relayerWallets);
+        await bridge.setQuorumWithApproval(8, nextNonce, sig2);
+        
+        expect(await bridge.operationNonce()).to.equal(currentNonce + 2n);
+      });
+    });
+
+    describe("nonce validation across different operations", async function () {
+      it("all quorum-protected operations share the same nonce counter", async function () {
+        let currentNonce = await bridge.operationNonce();
+        
+        // Operation 1: addRelayerWithApproval
+        const sig1 = await getSignaturesForAddRelayer(relayer4.address, currentNonce, relayerWallets);
+        await bridge.addRelayerWithApproval(relayer4.address, currentNonce, sig1);
+        expect(await bridge.operationNonce()).to.equal(currentNonce + 1n);
+        
+        // Operation 2: pause and setQuorumWithApproval
+        currentNonce = await bridge.operationNonce();
+        await bridge.pause();
+        const sig2 = await getSignaturesForSetQuorum(8, currentNonce, relayerWallets);
+        await bridge.setQuorumWithApproval(8, currentNonce, sig2);
+        expect(await bridge.operationNonce()).to.equal(currentNonce + 1n);
+        
+        // Operation 3: unpauseWithApproval
+        currentNonce = await bridge.operationNonce();
+        const sig3 = await getSignaturesForUnpause(currentNonce, relayerWallets);
+        await bridge.unpauseWithApproval(currentNonce, sig3);
+        expect(await bridge.operationNonce()).to.equal(currentNonce + 1n);
       });
     });
   });

@@ -9,12 +9,10 @@ describe("ERC20Safe, MintBurnERC20, and Bridge Interaction", function () {
   let boardMembers;
   let relayerWallets;
   const quorum = 7;
-  let nonce = 0;
 
   let erc20Safe, bridge, mintBurnErc20;
 
   async function setupContracts() {
-    nonce = 0;
     erc20Safe = await deployUpgradableContract(adminWallet, "ERC20Safe");
     bridge = await deployUpgradableContract(adminWallet, "Bridge", [boardMembers, quorum, erc20Safe.address]);
     await erc20Safe.setBridge(bridge.address);
@@ -24,17 +22,19 @@ describe("ERC20Safe, MintBurnERC20, and Bridge Interaction", function () {
     // Unpause safe first
     await erc20Safe.unpause();
     // Then unpause bridge with relayer signatures
-    const unpauseSigs = await getSignaturesForUnpause(++nonce, relayerWallets);
-    await bridge.unpauseWithApproval(nonce, unpauseSigs);
+    const currentNonce = await bridge.operationNonce();
+    const unpauseSigs = await getSignaturesForUnpause(currentNonce, relayerWallets);
+    await bridge.unpauseWithApproval(currentNonce, unpauseSigs);
   }
 
   async function setupErc20Token() {
     mintBurnErc20 = await deployUpgradableContract(adminWallet, "MintBurnERC20", ["Test Token", "TST", 6]);
     // Whitelist token through bridge with relayer signatures
+    const currentNonce = await bridge.operationNonce();
     const whitelistSigs = await getSignaturesForWhitelistToken(
-      mintBurnErc20.address, 0, 100, true, false, 0, 0, 0, ++nonce, relayerWallets
+      mintBurnErc20.address, 0, 100, true, false, 0, 0, 0, currentNonce, relayerWallets
     );
-    await bridge.whitelistToken(mintBurnErc20.address, 0, 100, true, false, 0, 0, 0, nonce, whitelistSigs);
+    await bridge.whitelistToken(mintBurnErc20.address, 0, 100, true, false, 0, 0, 0, currentNonce, whitelistSigs);
   }
 
   before(async function () {

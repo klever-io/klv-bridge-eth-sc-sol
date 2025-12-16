@@ -19,7 +19,6 @@ describe("ERC20Safe", function () {
   let adminWallet, otherWallet, simpleBoardMember;
   let boardMembers;
   let relayerWallets;
-  let nonce = 0;
 
   before(async function() {
     [adminWallet, otherWallet, simpleBoardMember] = await ethers.getSigners();
@@ -29,7 +28,6 @@ describe("ERC20Safe", function () {
 
   let safe, genericERC20, bridge;
   beforeEach(async function () {
-    nonce = 0;
     genericERC20 = await deployContract(adminWallet, "GenericERC20", ["TSC", "TSC", 6]);
     safe = await deployUpgradableContract(adminWallet, "ERC20Safe");
     bridge = await deployUpgradableContract(adminWallet, "Bridge", [boardMembers.map(m => m.address), 3, safe.address]);
@@ -46,22 +44,25 @@ describe("ERC20Safe", function () {
     if (!(await bridge.paused())) {
       await bridge.pause();
     }
+    const currentNonce = await bridge.operationNonce();
     const sigs = await getSignaturesForWhitelistToken(
-      tokenAddress, minAmount, maxAmount, mintBurn, native, totalBalance, mintBalance, burnBalance, ++nonce, relayerWallets
+      tokenAddress, minAmount, maxAmount, mintBurn, native, totalBalance, mintBalance, burnBalance, currentNonce, relayerWallets
     );
-    await bridge.whitelistToken(tokenAddress, minAmount, maxAmount, mintBurn, native, totalBalance, mintBalance, burnBalance, nonce, sigs);
+    await bridge.whitelistToken(tokenAddress, minAmount, maxAmount, mintBurn, native, totalBalance, mintBalance, burnBalance, currentNonce, sigs);
   }
 
   // Helper function to set token limits through bridge
   async function setTokenLimits(tokenAddress, minAmount, maxAmount) {
     // Need to unpause bridge for setTokenLimits (it doesn't require whenPaused)
     if (await bridge.paused()) {
-      const unpauseSigs = await getSignaturesForUnpause(++nonce, relayerWallets);
-      await bridge.unpauseWithApproval(nonce, unpauseSigs);
+      const currentNonce = await bridge.operationNonce();
+      const unpauseSigs = await getSignaturesForUnpause(currentNonce, relayerWallets);
+      await bridge.unpauseWithApproval(currentNonce, unpauseSigs);
     }
     
-    const sigs = await getSignaturesForSetTokenLimits(tokenAddress, minAmount, maxAmount, ++nonce, relayerWallets);
-    await bridge.setTokenLimits(tokenAddress, minAmount, maxAmount, nonce, sigs);
+    const currentNonce = await bridge.operationNonce();
+    const sigs = await getSignaturesForSetTokenLimits(tokenAddress, minAmount, maxAmount, currentNonce, relayerWallets);
+    await bridge.setTokenLimits(tokenAddress, minAmount, maxAmount, currentNonce, sigs);
   }
 
   // Helper function to remove token from whitelist through bridge
@@ -70,8 +71,9 @@ describe("ERC20Safe", function () {
     if (!(await bridge.paused())) {
       await bridge.pause();
     }
-    const sigs = await getSignaturesForRemoveToken(tokenAddress, ++nonce, relayerWallets);
-    await bridge.removeTokenFromWhitelist(tokenAddress, nonce, sigs);
+    const currentNonce = await bridge.operationNonce();
+    const sigs = await getSignaturesForRemoveToken(tokenAddress, currentNonce, relayerWallets);
+    await bridge.removeTokenFromWhitelist(tokenAddress, currentNonce, sigs);
   }
 
   // Helper function to recover lost funds through bridge
@@ -80,8 +82,9 @@ describe("ERC20Safe", function () {
     if (!(await bridge.paused())) {
       await bridge.pause();
     }
-    const sigs = await getSignaturesForRecoverLostFunds(tokenAddress, recipient, ++nonce, relayerWallets);
-    await bridge.recoverLostFunds(tokenAddress, recipient, nonce, sigs);
+    const currentNonce = await bridge.operationNonce();
+    const sigs = await getSignaturesForRecoverLostFunds(tokenAddress, recipient, currentNonce, relayerWallets);
+    await bridge.recoverLostFunds(tokenAddress, recipient, currentNonce, sigs);
   }
 
   it("sets creator as admin", async function () {
@@ -481,8 +484,9 @@ describe("ERC20Safe", function () {
       if (!(await bridge.paused())) {
         await bridge.pause();
       }
-      const updateBridgeSigs = await getSignaturesForUpdateSafeBridge(mockBridge.address, ++nonce, relayerWallets);
-      await bridge.updateSafeBridge(mockBridge.address, nonce, updateBridgeSigs);
+      const currentNonce = await bridge.operationNonce();
+      const updateBridgeSigs = await getSignaturesForUpdateSafeBridge(mockBridge.address, currentNonce, relayerWallets);
+      await bridge.updateSafeBridge(mockBridge.address, currentNonce, updateBridgeSigs);
 
       await safe.deposit(
         genericERC20.address,
