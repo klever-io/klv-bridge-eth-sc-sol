@@ -458,9 +458,7 @@ contract MultisigAdmin is ReentrancyGuard {
             emit TransactionExecuted(txId, msg.sender);
             emit ExecutedWithSignatures(currentNonce, _target, _value, _data, msg.sender);
         } else {
-            // Mark as not executed on failure
-            transactions[txId].executed = false;
-            emit TransactionSubmitted(txId, msg.sender, _target, _value, _data);
+            // Note: No need to reset executed flag - revert rolls back all state changes
             emit TransactionFailed(txId, result);
             emit SignatureExecutionFailed(currentNonce, _target, result);
             revert ExecutionFailed();
@@ -680,6 +678,17 @@ contract MultisigAdmin is ReentrancyGuard {
         // Adjust v for geth canonical values (0 or 1 -> 27 or 28)
         if (v == 0 || v == 1) {
             v += 27;
+        }
+
+        // EIP-2: Reject signatures with s-value in upper half of secp256k1 curve order
+        // This prevents signature malleability attacks
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            revert InvalidSignature();
+        }
+
+        // v must be 27 or 28
+        if (v != 27 && v != 28) {
+            revert InvalidSignature();
         }
 
         address signer = ecrecover(_ethSignedHash, v, r, s);
