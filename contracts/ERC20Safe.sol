@@ -58,7 +58,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
 
     function initialize() public initializer {
         __BridgeRole_init();
-        __Pausable_init();
+        __Pausable_init_unchained();
         __ERC20Safe__init_unchained();
     }
 
