@@ -1,6 +1,6 @@
 //SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
@@ -55,6 +55,7 @@ contract Bridge is Initializable, RelayerRole, Pausable {
      */
     function initialize(address[] memory board, uint256 initialQuorum, ERC20Safe erc20Safe) public virtual initializer {
         __RelayerRole_init();
+        __Pausable_init_unchained();
         __Bridge__init_unchained(board, initialQuorum, erc20Safe);
     }
 

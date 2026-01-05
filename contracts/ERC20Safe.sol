@@ -1,6 +1,6 @@
 //SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -58,7 +58,7 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
 
     function initialize() public initializer {
         __BridgeRole_init();
-        __Pausable_init();
+        __Pausable_init_unchained();
         __ERC20Safe__init_unchained();
     }
 
