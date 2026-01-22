@@ -36,6 +36,8 @@ import "./tasks/get-relayers"
 import "./tasks/get-token-properties"
 import "./tasks/reset-total-balance"
 import "./tasks/mintburn-test-tokens"
+import "./tasks/deposit-with-permit"
+import "./tasks/deposit-with-dai-permit"
 
 
 import { resolve } from "path";

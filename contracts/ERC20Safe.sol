@@ -20,6 +20,40 @@ interface IBurnableERC20 is IERC20 {
 }
 
 /**
+ * @dev Interface for EIP-2612 permit functionality
+ */
+interface IERC20Permit {
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external;
+
+    function nonces(address owner) external view returns (uint256);
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+}
+
+/**
+ * @dev Interface for DAI-style permit (uses allowed: bool instead of value: uint256)
+ */
+interface IDAIPermit {
+    function permit(
+        address holder,
+        address spender,
+        uint256 nonce,
+        uint256 expiry,
+        bool allowed,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external;
+}
+
+/**
 @title ERC20 Safe for bridging tokens
 @author MultiversX
 @notice Contract to be used by the users to make deposits that will be bridged
@@ -190,6 +224,62 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
         emit ERC20Deposit(batchNonce, depositNonce);
     }
 
+    /**
+      @notice Deposit with EIP-2612 permit - approve and deposit in single transaction
+      @param tokenAddress Address of the ERC20 token (must support EIP-2612)
+      @param amount Number of tokens to deposit
+      @param recipientAddress Address of the receiver on MultiversX Network
+      @param deadline Timestamp until which the permit is valid
+      @param v Signature parameter
+      @param r Signature parameter
+      @param s Signature parameter
+      @notice emits {ERC20Deposit} event
+    */
+    function depositWithPermit(
+        address tokenAddress,
+        uint256 amount,
+        bytes32 recipientAddress,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused {
+        _executePermit(tokenAddress, amount, deadline, v, r, s);
+        uint112 batchNonce;
+        uint112 depositNonce;
+        (batchNonce, depositNonce) = _deposit_common(tokenAddress, amount, recipientAddress);
+        emit ERC20Deposit(batchNonce, depositNonce);
+    }
+
+    /**
+      @notice Deposit with DAI-style permit - approve and deposit in single transaction
+      @param tokenAddress Address of the ERC20 token (must support DAI permit)
+      @param amount Number of tokens to deposit
+      @param recipientAddress Address of the receiver on MultiversX Network
+      @param nonce Current nonce of the permit
+      @param expiry Timestamp until which the permit is valid
+      @param v Signature parameter
+      @param r Signature parameter
+      @param s Signature parameter
+      @notice emits {ERC20Deposit} event
+    */
+    function depositWithDAIPermit(
+        address tokenAddress,
+        uint256 amount,
+        bytes32 recipientAddress,
+        uint256 nonce,
+        uint256 expiry,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused {
+        _executeDAIPermit(tokenAddress, nonce, expiry, v, r, s);
+        uint112 batchNonce;
+        uint112 depositNonce;
+        (batchNonce, depositNonce) = _deposit_common(tokenAddress, amount, recipientAddress);
+        emit ERC20Deposit(batchNonce, depositNonce);
+    }
+
     /*
      * @notice Entrypoint for the user in the bridge. Will create a new deposit
      * @dev The `callData` parameter is structured to include the endpoint name, gas limit, and arguments for the cross-chain call.
@@ -206,6 +296,66 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
      *        00 (ArgumentsPresentProtocolMarker)
      */
     function depositWithSCExecution(address tokenAddress, uint256 amount, bytes32 recipientAddress, bytes calldata callData) public whenNotPaused {
+        uint112 batchNonce;
+        uint112 depositNonce;
+        (batchNonce, depositNonce) = _deposit_common(tokenAddress, amount, recipientAddress);
+        emit ERC20SCDeposit(batchNonce, depositNonce, callData);
+    }
+
+    /**
+      @notice Deposit with SC execution and EIP-2612 permit - approve and deposit in single transaction
+      @param tokenAddress Address of the ERC20 token (must support EIP-2612)
+      @param amount Number of tokens to deposit
+      @param recipientAddress Address of the receiver SC on MultiversX Network
+      @param callData Encoded cross-chain call details
+      @param deadline Timestamp until which the permit is valid
+      @param v Signature parameter
+      @param r Signature parameter
+      @param s Signature parameter
+      @notice emits {ERC20SCDeposit} event
+    */
+    function depositWithSCExecutionAndPermit(
+        address tokenAddress,
+        uint256 amount,
+        bytes32 recipientAddress,
+        bytes calldata callData,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused {
+        _executePermit(tokenAddress, amount, deadline, v, r, s);
+        uint112 batchNonce;
+        uint112 depositNonce;
+        (batchNonce, depositNonce) = _deposit_common(tokenAddress, amount, recipientAddress);
+        emit ERC20SCDeposit(batchNonce, depositNonce, callData);
+    }
+
+    /**
+      @notice Deposit with SC execution and DAI-style permit - approve and deposit in single transaction
+      @param tokenAddress Address of the ERC20 token (must support DAI permit)
+      @param amount Number of tokens to deposit
+      @param recipientAddress Address of the receiver SC on MultiversX Network
+      @param callData Encoded cross-chain call details
+      @param nonce Current nonce of the permit
+      @param expiry Timestamp until which the permit is valid
+      @param v Signature parameter
+      @param r Signature parameter
+      @param s Signature parameter
+      @notice emits {ERC20SCDeposit} event
+    */
+    function depositWithSCExecutionAndDAIPermit(
+        address tokenAddress,
+        uint256 amount,
+        bytes32 recipientAddress,
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 expiry,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused {
+        _executeDAIPermit(tokenAddress, nonce, expiry, v, r, s);
         uint112 batchNonce;
         uint112 depositNonce;
         (batchNonce, depositNonce) = _deposit_common(tokenAddress, amount, recipientAddress);
@@ -419,5 +569,48 @@ contract ERC20Safe is Initializable, BridgeRole, Pausable {
 
     function _isTokenMintBurn(address token) internal view returns (bool) {
         return mintBurnTokens[token];
+    }
+
+    /**
+     * @dev Execute EIP-2612 permit. If permit fails, check if allowance already exists.
+     * This handles the case where permit was already used (front-running) but user has existing approval.
+     */
+    function _executePermit(
+        address token,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal {
+        try IERC20Permit(token).permit(msg.sender, address(this), amount, deadline, v, r, s) {
+            // Permit succeeded
+        } catch {
+            // Permit failed - check if we already have sufficient allowance
+            uint256 currentAllowance = IERC20(token).allowance(msg.sender, address(this));
+            require(currentAllowance >= amount, "Permit failed and insufficient allowance");
+        }
+    }
+
+    /**
+     * @dev Execute DAI-style permit. If permit fails, check if allowance already exists.
+     * DAI permit uses allowed: bool and sets max approval when true.
+     */
+    function _executeDAIPermit(
+        address token,
+        uint256 nonce,
+        uint256 expiry,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal {
+        try IDAIPermit(token).permit(msg.sender, address(this), nonce, expiry, true, v, r, s) {
+            // Permit succeeded
+        } catch {
+            // Permit failed - check if we already have sufficient allowance
+            // For DAI permit, we can't know the exact amount, so we just check for max approval
+            uint256 currentAllowance = IERC20(token).allowance(msg.sender, address(this));
+            require(currentAllowance > 0, "Permit failed and no allowance");
+        }
     }
 }

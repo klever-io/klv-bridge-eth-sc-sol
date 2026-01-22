@@ -521,4 +521,219 @@ describe("ERC20Safe", function () {
       await safe.setBatchSize(currentBatchSize);
     });
   });
+
+  describe("ERC20Safe - EIP-2612 permit deposits", async function() {
+    let permitERC20;
+    const recipientAddress = Buffer.from("c0f0058cea88a2bc1240b60361efb965957038d05f916c42b3f23a2c38ced81e", "hex");
+
+    beforeEach(async function() {
+      permitERC20 = await deployContract(adminWallet, "PermitERC20", ["PermitToken", "PMT", 18]);
+      await permitERC20.mint(adminWallet.address, ethers.parseEther("1000"));
+      await safe.whitelistToken(permitERC20.target, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+    });
+
+    async function getPermitSignature(signer, token, spender, value, deadline) {
+      const [name, nonce, chainId] = await Promise.all([
+        token.name(),
+        token.nonces(signer.address),
+        signer.provider.getNetwork().then(n => n.chainId)
+      ]);
+
+      const domain = {
+        name: name,
+        version: "1",
+        chainId: chainId,
+        verifyingContract: token.target
+      };
+
+      const types = {
+        Permit: [
+          { name: "owner", type: "address" },
+          { name: "spender", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" }
+        ]
+      };
+
+      const message = {
+        owner: signer.address,
+        spender: spender,
+        value: value,
+        nonce: nonce,
+        deadline: deadline
+      };
+
+      const signature = await signer.signTypedData(domain, types, message);
+      const { v, r, s } = ethers.Signature.from(signature);
+      return { v, r, s };
+    }
+
+    it("deposits with valid permit signature", async function() {
+      const amount = defaultMinAmount;
+      const block = await ethers.provider.getBlock('latest');
+      const deadline = block.timestamp + 3600; // 1 hour from current block time
+
+      const { v, r, s } = await getPermitSignature(adminWallet, permitERC20, safe.target, amount, deadline);
+
+      const balanceBefore = await permitERC20.balanceOf(adminWallet.address);
+
+      await expect(
+        safe.depositWithPermit(permitERC20.target, amount, recipientAddress, deadline, v, r, s)
+      ).to.emit(safe, "ERC20Deposit");
+
+      const balanceAfter = await permitERC20.balanceOf(adminWallet.address);
+      expect(balanceBefore - balanceAfter).to.equal(amount);
+    });
+
+    it("reverts with expired deadline", async function() {
+      const amount = defaultMinAmount;
+      const block = await ethers.provider.getBlock('latest');
+      const deadline = block.timestamp - 3600; // 1 hour ago (expired)
+
+      const { v, r, s } = await getPermitSignature(adminWallet, permitERC20, safe.target, amount, deadline);
+
+      // Should fail because deadline has passed
+      await expect(
+        safe.depositWithPermit(permitERC20.target, amount, recipientAddress, deadline, v, r, s)
+      ).to.be.reverted;
+    });
+
+    it("succeeds if permit fails but allowance exists", async function() {
+      const amount = defaultMinAmount;
+      const block = await ethers.provider.getBlock('latest');
+      const deadline = block.timestamp + 3600;
+
+      // Pre-approve the safe
+      await permitERC20.approve(safe.target, amount);
+
+      // Use invalid signature (wrong v value)
+      const { r, s } = await getPermitSignature(adminWallet, permitERC20, safe.target, amount, deadline);
+      const invalidV = 99; // Invalid v value
+
+      // Should succeed because we have existing allowance
+      await expect(
+        safe.depositWithPermit(permitERC20.target, amount, recipientAddress, deadline, invalidV, r, s)
+      ).to.emit(safe, "ERC20Deposit");
+    });
+
+    it("reverts if permit fails and no allowance", async function() {
+      const amount = defaultMinAmount;
+      const block = await ethers.provider.getBlock('latest');
+      const deadline = block.timestamp + 3600;
+
+      // Use invalid signature without pre-approval
+      const { r, s } = await getPermitSignature(adminWallet, permitERC20, safe.target, amount, deadline);
+      const invalidV = 99;
+
+      await expect(
+        safe.depositWithPermit(permitERC20.target, amount, recipientAddress, deadline, invalidV, r, s)
+      ).to.be.revertedWith("Permit failed and insufficient allowance");
+    });
+
+    it("deposits with SC execution and permit", async function() {
+      const amount = defaultMinAmount;
+      const block = await ethers.provider.getBlock('latest');
+      const deadline = block.timestamp + 3600;
+      const callData = encodeCallData("testEndpoint", 500000, [42, "arg"]);
+
+      const { v, r, s } = await getPermitSignature(adminWallet, permitERC20, safe.target, amount, deadline);
+
+      await expect(
+        safe.depositWithSCExecutionAndPermit(permitERC20.target, amount, recipientAddress, callData, deadline, v, r, s)
+      ).to.emit(safe, "ERC20SCDeposit");
+    });
+  });
+
+  describe("ERC20Safe - DAI-style permit deposits", async function() {
+    let daiPermitERC20;
+    const recipientAddress = Buffer.from("c0f0058cea88a2bc1240b60361efb965957038d05f916c42b3f23a2c38ced81e", "hex");
+
+    beforeEach(async function() {
+      daiPermitERC20 = await deployContract(adminWallet, "DAIPermitERC20", ["DAIPermitToken", "DPMT", 18]);
+      await daiPermitERC20.mint(adminWallet.address, ethers.parseEther("1000"));
+      await safe.whitelistToken(daiPermitERC20.target, defaultMinAmount, defaultMaxAmount, false, true, 0, 0, 0);
+    });
+
+    async function getDAIPermitSignature(signer, token, spender, nonce, expiry, allowed) {
+      const [name, chainId] = await Promise.all([
+        token.name(),
+        signer.provider.getNetwork().then(n => n.chainId)
+      ]);
+
+      const domain = {
+        name: name,
+        version: "1",
+        chainId: chainId,
+        verifyingContract: token.target
+      };
+
+      const types = {
+        Permit: [
+          { name: "holder", type: "address" },
+          { name: "spender", type: "address" },
+          { name: "nonce", type: "uint256" },
+          { name: "expiry", type: "uint256" },
+          { name: "allowed", type: "bool" }
+        ]
+      };
+
+      const message = {
+        holder: signer.address,
+        spender: spender,
+        nonce: nonce,
+        expiry: expiry,
+        allowed: allowed
+      };
+
+      const signature = await signer.signTypedData(domain, types, message);
+      const { v, r, s } = ethers.Signature.from(signature);
+      return { v, r, s };
+    }
+
+    it("deposits with valid DAI permit signature", async function() {
+      const amount = defaultMinAmount;
+      const nonce = await daiPermitERC20.nonces(adminWallet.address);
+      const block = await ethers.provider.getBlock('latest');
+      const expiry = block.timestamp + 3600; // 1 hour from current block time
+
+      const { v, r, s } = await getDAIPermitSignature(adminWallet, daiPermitERC20, safe.target, nonce, expiry, true);
+
+      const balanceBefore = await daiPermitERC20.balanceOf(adminWallet.address);
+
+      await expect(
+        safe.depositWithDAIPermit(daiPermitERC20.target, amount, recipientAddress, nonce, expiry, v, r, s)
+      ).to.emit(safe, "ERC20Deposit");
+
+      const balanceAfter = await daiPermitERC20.balanceOf(adminWallet.address);
+      expect(balanceBefore - balanceAfter).to.equal(amount);
+    });
+
+    it("reverts with expired expiry", async function() {
+      const amount = defaultMinAmount;
+      const nonce = await daiPermitERC20.nonces(adminWallet.address);
+      const block = await ethers.provider.getBlock('latest');
+      const expiry = block.timestamp - 3600; // 1 hour ago (expired)
+
+      const { v, r, s } = await getDAIPermitSignature(adminWallet, daiPermitERC20, safe.target, nonce, expiry, true);
+
+      await expect(
+        safe.depositWithDAIPermit(daiPermitERC20.target, amount, recipientAddress, nonce, expiry, v, r, s)
+      ).to.be.reverted;
+    });
+
+    it("deposits with SC execution and DAI permit", async function() {
+      const amount = defaultMinAmount;
+      const nonce = await daiPermitERC20.nonces(adminWallet.address);
+      const block = await ethers.provider.getBlock('latest');
+      const expiry = block.timestamp + 3600;
+      const callData = encodeCallData("testEndpoint", 500000, [42, "arg"]);
+
+      const { v, r, s } = await getDAIPermitSignature(adminWallet, daiPermitERC20, safe.target, nonce, expiry, true);
+
+      await expect(
+        safe.depositWithSCExecutionAndDAIPermit(daiPermitERC20.target, amount, recipientAddress, callData, nonce, expiry, v, r, s)
+      ).to.emit(safe, "ERC20SCDeposit");
+    });
+  });
 });
